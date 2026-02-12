@@ -8,6 +8,8 @@ import streamlit as st
 # ---------------------------
 st.set_page_config(page_title="WHALER", layout="centered")
 
+st.image("whaler_logo.png", width=80)
+
 st.markdown(
     """
 <style>
