@@ -1,6 +1,5 @@
 import io
-import re
-from datetime import datetime, date
+from datetime import date
 
 import numpy as np
 import pandas as pd
@@ -142,7 +141,6 @@ def find_col(df: pd.DataFrame, candidates):
     for cand in candidates:
         if cand.lower() in cols:
             return cols[cand.lower()]
-    # fuzzy contains
     for c in df.columns:
         cl = c.lower()
         for cand in candidates:
@@ -151,35 +149,22 @@ def find_col(df: pd.DataFrame, candidates):
     return None
 
 def parse_date_series(s: pd.Series) -> pd.Series:
-    # robust parse; works with many CSV exports
-    return pd.to_datetime(s, errors="coerce", infer_datetime_format=True).dt.date
+    dt = pd.to_datetime(s, errors="coerce")
+    return dt.dt.date
 
 def classify_type(text: str) -> str:
-    """
-    Map line item descriptions into WHALER buckets:
-    chat, video, gifts, other
-    """
     t = (text or "").lower()
-
-    # video-ish
     if any(k in t for k in ["video", "cam", "call", "phone", "live", "1:1", "one-on-one"]):
         return "Video"
-
-    # chat-ish
     if any(k in t for k in ["chat", "message", "msg", "text", "dm", "conversation"]):
         return "Chat"
-
-    # gifts-ish
     if any(k in t for k in ["gift", "rose", "tip", "present", "token", "sticker"]):
         return "Gifts"
-
     return "Other"
 
 def blur_name(name: str, idx: int) -> str:
-    # idx is 1-based rank
     if idx <= 3:
         return name
-    # blur-ish: keep first letter and last letter (if any)
     n = (name or "").strip()
     if len(n) <= 2:
         return "•••"
@@ -198,9 +183,6 @@ def kpi_card(label: str, value: str, sub: str = ""):
     )
 
 def stacked_bar_top3(top3_breakdown: pd.DataFrame):
-    """
-    top3_breakdown columns: Name, Chat, Video, Gifts, Other, Total
-    """
     labels = top3_breakdown["Name"].tolist()
     categories = ["Chat", "Video", "Gifts", "Other"]
     vals = {cat: top3_breakdown[cat].astype(float).values for cat in categories}
@@ -208,20 +190,15 @@ def stacked_bar_top3(top3_breakdown: pd.DataFrame):
     fig, ax = plt.subplots(figsize=(8.8, 3.8), dpi=150)
 
     bottom = np.zeros(len(labels))
-    for i, cat in enumerate(categories):
+    for cat in categories:
         ax.bar(labels, vals[cat], bottom=bottom)
         bottom += vals[cat]
 
     ax.set_title("Top 3 Whale Breakdown", fontsize=12, fontweight="bold")
     ax.set_ylabel("Earnings ($)")
     ax.grid(axis="y", alpha=0.25)
-    ax.spines["top"].set_alpha(0.15)
-    ax.spines["right"].set_alpha(0.15)
-    ax.spines["left"].set_alpha(0.15)
-    ax.spines["bottom"].set_alpha(0.15)
-    ax.tick_params(axis="x", rotation=0)
-
-    # Legend
+    for sp in ["top", "right", "left", "bottom"]:
+        ax.spines[sp].set_alpha(0.15)
     ax.legend(categories, loc="upper right", frameon=False)
 
     st.pyplot(fig, use_container_width=True)
@@ -232,11 +209,10 @@ def line_daily(daily: pd.DataFrame):
     ax.set_title("Daily Earnings", fontsize=12, fontweight="bold")
     ax.set_ylabel("Earnings ($)")
     ax.grid(axis="y", alpha=0.25)
-    ax.tick_params(axis="x", rotation=0)
     st.pyplot(fig, use_container_width=True)
 
 # ---------- Header ----------
-left, right = st.columns([0.72, 0.28], vertical_alignment="center")
+left, right = st.columns([0.72, 0.28])  # removed vertical_alignment for compatibility
 
 with left:
     st.markdown('<div class="h1">WHALER</div>', unsafe_allow_html=True)
@@ -273,7 +249,6 @@ dfs = []
 for f in files:
     try:
         content = f.read()
-        # try utf-8 then fallback
         try:
             df = pd.read_csv(io.BytesIO(content))
         except Exception:
@@ -295,36 +270,27 @@ col_credit = find_col(raw, ["credit", "credits", "amount", "earned", "earnings",
 col_debit = find_col(raw, ["debit", "debits", "fee", "fees"])
 col_user = find_col(raw, ["user", "username", "from", "payer", "sender", "customer", "name"])
 
-# Minimum requirements
 if col_date is None or col_credit is None:
-    st.error(
-        "This CSV format is missing required columns. I need at least a Date column and an Amount/Credit column."
-    )
+    st.error("Missing required columns. Need at least a Date column and an Amount/Credit column.")
     st.stop()
 
 df = raw.copy()
 
-# Parse
 df["Date"] = parse_date_series(df[col_date])
 df["Description"] = df[col_desc].astype(str) if col_desc else ""
 df["Whale"] = df[col_user].astype(str) if col_user else "Unknown"
 
-# Credits/Debits
 df["Credits"] = df[col_credit].apply(safe_num)
 df["Debits"] = df[col_debit].apply(safe_num) if col_debit else 0.0
 
-# If "Amount" exists but includes negatives, normalize into Credits/Debits
-# (we keep it simple: negative -> debit)
 neg_mask = df["Credits"] < 0
 if neg_mask.any():
     df.loc[neg_mask, "Debits"] = df.loc[neg_mask, "Credits"].abs()
     df.loc[neg_mask, "Credits"] = 0.0
 
-# Type buckets
 df["Category"] = df["Description"].apply(classify_type)
 
-# ---------- Dedupe Rule (your locked rule) ----------
-# Composite key: Date + Description + Credits + Debits
+# ---------- Dedupe Rule ----------
 df["__key__"] = (
     df["Date"].astype(str)
     + "||"
@@ -336,17 +302,13 @@ df["__key__"] = (
 )
 df = df.drop_duplicates(subset="__key__", keep="first").drop(columns=["__key__"])
 
-# Clean date nulls
 df = df[df["Date"].notna()].copy()
 
-# Period bounds
 min_d = df["Date"].min()
 max_d = df["Date"].max()
 
-# Total earnings (revenue only, per your instruction)
 total_earnings = df["Credits"].sum()
 
-# Daily aggregates
 daily = (
     df.groupby("Date", as_index=False)["Credits"]
     .sum()
@@ -354,7 +316,6 @@ daily = (
     .sort_values("Date")
 )
 
-# Days in sample for projections
 days_in_sample = (pd.to_datetime(max_d) - pd.to_datetime(min_d)).days + 1
 days_in_sample = max(1, int(days_in_sample))
 daily_avg = total_earnings / days_in_sample
@@ -362,7 +323,6 @@ daily_avg = total_earnings / days_in_sample
 monthly_projection = daily_avg * 30.0
 yearly_projection = daily_avg * 365.0
 
-# Whale rollup
 whales = (
     df.groupby("Whale", as_index=False)["Credits"]
     .sum()
@@ -371,11 +331,9 @@ whales = (
 )
 total_whales = int(whales.shape[0])
 
-# If you have separate "calls" and "chats" columns in some exports, we can count events by category:
 total_chats = int((df["Category"] == "Chat").sum())
 total_calls = int((df["Category"] == "Video").sum())
 
-# Top 10 whales table (blur 4-10)
 top10 = whales.head(10).copy()
 top10["Rank"] = np.arange(1, len(top10) + 1)
 top10["Whale (blurred)"] = [
@@ -384,7 +342,6 @@ top10["Whale (blurred)"] = [
 top10["Earnings"] = top10["Total"].apply(money)
 top10_display = top10[["Rank", "Whale (blurred)", "Earnings"]]
 
-# Top 3 breakdown (stacked by category)
 top3_names = whales.head(3)["Whale"].tolist()
 df_top3 = df[df["Whale"].isin(top3_names)].copy()
 
@@ -405,15 +362,12 @@ for col in ["Chat", "Video", "Gifts", "Other"]:
 
 pivot["Total"] = pivot[["Chat", "Video", "Gifts", "Other"]].sum(axis=1)
 
-# Keep in same order as whales top3
 pivot["__order__"] = pivot["Whale"].apply(lambda x: top3_names.index(x) if x in top3_names else 999)
 pivot = pivot.sort_values("__order__").drop(columns="__order__")
 pivot = pivot.rename(columns={"Whale": "Name"})
 
 # ---------- Layout ----------
-# Top KPI row (clean, Stripe-ish)
 k1, k2, k3, k4, k5 = st.columns([1.35, 1, 1, 1, 1])
-
 with k1:
     kpi_card("Total Earnings this Period", money(total_earnings), f"{min_d} → {max_d}")
 with k2:
@@ -427,21 +381,18 @@ with k5:
 
 st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
-# Second KPI row: calls/chats + quick context
 a1, a2, a3 = st.columns([1, 1, 1])
 with a1:
     kpi_card("Total Chats", f"{total_chats:,}", "Chat-type transactions")
 with a2:
     kpi_card("Total Calls", f"{total_calls:,}", "Video/call-type transactions")
 with a3:
-    # show top whale concentration
     top3_total = whales.head(3)["Total"].sum()
     concentration = (top3_total / total_earnings * 100.0) if total_earnings > 0 else 0.0
     kpi_card("Top 3 Concentration", f"{concentration:,.1f}%", "How much 3 whales drive")
 
 st.markdown("<div style='height:16px;'></div>", unsafe_allow_html=True)
 
-# Main body: left table, right charts
 left_col, right_col = st.columns([0.92, 1.08], gap="large")
 
 with left_col:
@@ -454,11 +405,7 @@ with left_col:
 """,
         unsafe_allow_html=True,
     )
-    st.dataframe(
-        top10_display,
-        use_container_width=True,
-        hide_index=True,
-    )
+    st.dataframe(top10_display, use_container_width=True, hide_index=True)
 
     st.markdown("<div style='height:10px;'></div>", unsafe_allow_html=True)
 
@@ -489,8 +436,6 @@ with right_col:
 """,
         unsafe_allow_html=True,
     )
-
-    # Chart
     stacked_bar_top3(pivot[["Name", "Chat", "Video", "Gifts", "Other", "Total"]])
 
     st.markdown("<div style='height:12px;'></div>", unsafe_allow_html=True)
@@ -506,10 +451,9 @@ with right_col:
     )
     line_daily(daily)
 
-# Footer note
 st.markdown("<div style='height:14px;'></div>", unsafe_allow_html=True)
 st.markdown(
-    f"""
+    """
 <div class="sub" style="text-align:center;">
   Dedupe rule: Date + Description + Credits + Debits • Revenue only • WHALER V1
 </div>
